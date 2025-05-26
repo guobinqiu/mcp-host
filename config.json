@@ -1,0 +1,14 @@
+{
+  "servers": [
+    {
+      "name": "calculator",
+      "type": "stdio",
+      "path": "bin/calculator-server"
+    },
+    {
+      "name": "ip-location-query",
+      "type": "http",
+      "url": "http://localhost:8080/mcp"
+    }
+  ]
+}
