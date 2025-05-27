@@ -1,5 +1,7 @@
 # MCP Host
 
+[第二课](https://github.com/guobinqiu/mcp-demo-golang)
+
 ## 配置 MCP Servers
 
 config.json
