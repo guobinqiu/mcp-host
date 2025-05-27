@@ -1,4 +1,4 @@
-# MCP Host
+# MCP Host [第三课]
 
 [第二课](https://github.com/guobinqiu/mcp-demo-golang)
 
