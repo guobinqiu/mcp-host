@@ -2,6 +2,8 @@
 
 [第二课](https://github.com/guobinqiu/mcp-demo-golang)
 
+<img width="488" alt="image" src="https://github.com/user-attachments/assets/aee62cee-adc1-47eb-a594-bd6b8bc812b4" />
+
 ## 配置 MCP Servers
 
 config.json
