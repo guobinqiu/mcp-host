@@ -1,14 +1,14 @@
 {
-  "servers": [
-    {
-      "name": "calculator",
+  "mcpServers": {
+    "calculator": {
       "type": "stdio",
-      "path": "bin/calculator-server"
+      "command": "bin/calculator-server",
+      "args": []
     },
-    {
-      "name": "ip-location-query",
+    "ip-location-query": {
       "type": "http",
-      "url": "http://localhost:8080/mcp"
+      "command": "http://localhost:8080/mcp",
+      "args": []
     }
-  ]
+  }
 }

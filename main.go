@@ -10,46 +10,107 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/joho/godotenv"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/sashabaranov/go-openai"
 )
 
+type MCPConfig struct {
+	MCPServers map[string]MCPServer `json:"mcpServers"`
+}
+
+type MCPServer struct {
+	Type    string   `json:"type" validate:"required"`
+	Command string   `json:"command" validate:"required"`
+	Args    []string `json:"args,omitempty"`
+}
+
 type ChatClient struct {
-	mcpClient    *client.Client
+	mcpClients   []*client.Client
 	openaiClient *openai.Client
 	model        string
 	messages     []openai.ChatCompletionMessage // 用于存储历史消息，实现多轮对话
+}
+
+// 创建客户端实例，连接 MCP 服务端
+func LoadMCPClients(configPath string, ctx context.Context) ([]*client.Client, []error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, []error{err}
+	}
+
+	var mcpConfig MCPConfig
+	err = json.Unmarshal(data, &mcpConfig)
+	if err != nil {
+		return nil, []error{err}
+	}
+
+	if err := validator.New().Struct(mcpConfig); err != nil {
+		return nil, []error{err}
+	}
+
+	var mcpClients []*client.Client
+	var errors []error
+
+	for name, mcpServer := range mcpConfig.MCPServers {
+		var mcpClient *client.Client
+		var err error
+
+		switch strings.ToLower(mcpServer.Type) {
+		case "stdio":
+			mcpClient, err = client.NewStdioMCPClient(mcpServer.Command, mcpServer.Args)
+		case "http":
+			mcpClient, err = client.NewStreamableHttpClient(mcpServer.Command)
+		case "sse":
+			mcpClient, err = client.NewSSEMCPClient(mcpServer.Command)
+		default:
+			err = fmt.Errorf("未知服务类型: %s (%s)", name, mcpServer.Type)
+		}
+
+		if err != nil {
+			errors = append(errors, fmt.Errorf("[%s] 创建客户端失败: %v", name, err))
+			continue
+		}
+
+		// 初始化 MCP 客户端
+		fmt.Println("Initializing client...")
+		initRequest := mcp.InitializeRequest{}
+		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+		initRequest.Params.ClientInfo = mcp.Implementation{
+			Name:    name, // 使用配置中的名称作为客户端名
+			Version: "1.0.0",
+		}
+		initResult, err := mcpClient.Initialize(ctx, initRequest)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("[%s] 初始化失败: %v", name, err))
+			continue
+		}
+
+		fmt.Printf("[%s] Connected to server: %s %s\n", name, initResult.ServerInfo.Name, initResult.ServerInfo.Version)
+
+		mcpClients = append(mcpClients, mcpClient)
+	}
+
+	return mcpClients, errors
 }
 
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 创建客户端实例，连接 MCP 服务端
-	mcpClient, err := client.NewStdioMCPClient(
-		"bin/calculator-server",
-		[]string{},
-	)
-	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+	mcpClients, errs := LoadMCPClients("config.json", ctx)
+	if len(errs) > 0 {
+		for _, err := range errs {
+			log.Println(err)
+		}
 	}
-	defer mcpClient.Close()
-
-	// 初始化 MCP 客户端
-	fmt.Println("Initializing client...")
-	initRequest := mcp.InitializeRequest{}
-	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initRequest.Params.ClientInfo = mcp.Implementation{
-		Name:    "calculator-client",
-		Version: "1.0.0",
-	}
-	initResult, err := mcpClient.Initialize(ctx, initRequest)
-	if err != nil {
-		log.Fatalf("Failed to initialize: %v", err)
-	}
-	fmt.Printf("Connected to server: %s %s\n\n", initResult.ServerInfo.Name, initResult.ServerInfo.Version)
+	defer func() {
+		for _, mcpClient := range mcpClients {
+			mcpClient.Close()
+		}
+	}()
 
 	_ = godotenv.Load()
 
@@ -66,7 +127,7 @@ func main() {
 	openaiClient := openai.NewClientWithConfig(config)
 
 	cc := &ChatClient{
-		mcpClient:    mcpClient,
+		mcpClients:   mcpClients,
 		openaiClient: openaiClient,
 		model:        model,
 		messages:     make([]openai.ChatCompletionMessage, 0),
@@ -104,26 +165,35 @@ func (cc *ChatClient) ProcessQuery(userInput string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// 维护toolName到mcpClient的映射
+	toolNameMap := make(map[string]*client.Client)
+
 	// 列出所有可用工具
 	availableTools := []openai.Tool{}
-	toolsResp, err := cc.mcpClient.ListTools(ctx, mcp.ListToolsRequest{}) // 如多个mcpClient这里改成for循环
-	if err != nil {
-		log.Printf("Failed to list tools: %v", err)
-	}
-	for _, tool := range toolsResp.Tools {
-		// fmt.Println("name:", tool.Name)
-		// fmt.Println("description:", tool.Description)
-		// fmt.Println("parameters:", tool.InputSchema)
-		availableTools = append(availableTools, openai.Tool{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name:        tool.Name,
-				Description: tool.Description,
-				Parameters:  tool.InputSchema,
-			},
-		})
+
+	for _, mcpClient := range cc.mcpClients {
+		toolsResp, err := mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
+		if err != nil {
+			log.Printf("Failed to list tools: %v", err)
+		}
+		for _, tool := range toolsResp.Tools {
+			// fmt.Println("name:", tool.Name)
+			// fmt.Println("description:", tool.Description)
+			// fmt.Println("parameters:", tool.InputSchema)
+			availableTools = append(availableTools, openai.Tool{
+				Type: openai.ToolTypeFunction,
+				Function: &openai.FunctionDefinition{
+					Name:        tool.Name,
+					Description: tool.Description,
+					Parameters:  tool.InputSchema,
+				},
+			})
+
+			toolNameMap[tool.Name] = mcpClient
+		}
 	}
 
+	// 存储助理回复的消息
 	finalText := []string{}
 
 	// 首轮交互
@@ -173,7 +243,9 @@ func (cc *ChatClient) ProcessQuery(userInput string) (string, error) {
 				req := mcp.CallToolRequest{}
 				req.Params.Name = toolName
 				req.Params.Arguments = toolArgs
-				resp, err := cc.mcpClient.CallTool(ctx, req)
+				//resp, err := cc.mcpClient.CallTool(ctx, req)
+				mcpClient := toolNameMap[toolName]
+				resp, err := mcpClient.CallTool(ctx, req)
 				if err != nil {
 					log.Printf("工具调用失败: %v", err)
 					continue
@@ -225,6 +297,11 @@ func (cc *ChatClient) ProcessQuery(userInput string) (string, error) {
 		}
 	}
 
-	// 把所有回答合并返回，方便下一次调用能用完整的上下文
-	return strings.Join(finalText, "\n"), nil
+	// 把助理的所有回答合并成一个字符串，方便下一次调用时使用完整的对话上下文
+	response := strings.Join(finalText, "\n")
+	cc.messages = append(cc.messages, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleAssistant,
+		Content: response,
+	})
+	return response, nil
 }
