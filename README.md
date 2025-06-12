@@ -78,4 +78,4 @@ Assistant: 我调用了以下两个工具来完成你的请求：
 如果你需要进一步了解这些工具的功能或使用方法，可以随时告诉我！
 ```
 
-[上一课](https://github.com/guobinqiu/mcp-demo-golang)
+[上一课](https://github.com/guobinqiu/mcp-demo-golang) [下一课](https://github.com/guobinqiu/mcp-host-web)
